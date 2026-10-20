@@ -17,7 +17,6 @@ def run(script, args, extra):
         "--dataset", args.dataset,
         "--gpu", args.gpu,
         "--epochs", str(args.epochs),
-        "--workers", str(args.workers),
         *extra,
     ]
     if args.max_steps:
