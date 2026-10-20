@@ -44,8 +44,8 @@ from network import Network, build_model  # noqa: E402
 _LEGACY = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
 WORK = _LEGACY if _LEGACY.exists() else ROOT.parent / "datasets"
 PRETRAINED = ROOT / "pretrained" / "spatial_warp.pth"
-WIDTH = 480
-HEIGHT = 360
+def camera_size(dataset):
+    return (518, 434) if "1224" in dataset else (518, 294)
 
 # Epochs are the requested finetune lengths. lr is lower than the original
 # 1e-4 because these runs start from the released weights.
@@ -60,13 +60,15 @@ DATASETS = {
             }
         ],
     },
-    "lyft": {
+    "lyft1920": {
         "epochs": 3,
         "lr": 1e-5,
-        "parts": [
-            {"root": WORK / "lyft/lyft_train1920_3cams", "list": "train1920.txt"},
-            {"root": WORK / "lyft/lyft_train1224_3cams", "list": "train1224.txt"},
-        ],
+        "parts": [{"root": WORK / "lyft/lyft_train1920_3cams", "list": "train1920.txt"}],
+    },
+    "lyft1224": {
+        "epochs": 3,
+        "lr": 1e-5,
+        "parts": [{"root": WORK / "lyft/lyft_train1224_3cams", "list": "train1224.txt"}],
     },
     "widedrive3": {
         "epochs": 3,
@@ -91,7 +93,8 @@ def read_list(path):
 class PairDataset(Dataset):
     """One sample is camera 5 and one overlapping side camera, same frame."""
 
-    def __init__(self, parts):
+    def __init__(self, parts, size):
+        self.size = size
         self.pairs = []
         for part in parts:
             root = Path(part["root"])
@@ -123,14 +126,15 @@ class PairDataset(Dataset):
         first, second = self.pairs[index]
         if random.randint(0, 1) == 1:
             first, second = second, first
-        return load_tensor(first), load_tensor(second)
+        return load_tensor(first, self.size), load_tensor(second, self.size)
 
 
-def load_tensor(path):
+def load_tensor(path, size):
     image = cv2.imread(path, cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"failed to read {path}")
-    image = cv2.resize(image, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    image = cv2.resize(image, (480, 360), interpolation=cv2.INTER_AREA)
     array = image.astype(np.float32)
     array = (array / 127.5) - 1.0
     array = np.transpose(array, (2, 0, 1))
@@ -153,7 +157,7 @@ def train(args):
         raise SystemExit("finetuning needs CUDA")
     torch.cuda.set_device(0)
 
-    data = PairDataset(spec["parts"])
+    data = PairDataset(spec["parts"], camera_size(args.dataset))
     loader = DataLoader(
         data,
         batch_size=args.batch_size,

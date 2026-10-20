@@ -27,15 +27,18 @@ from torch.utils.data import DataLoader, Dataset
 ROOT = Path(__file__).resolve().parent
 _LEGACY = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
 WORK = _LEGACY if _LEGACY.exists() else ROOT.parent / "datasets"
-WIDTH, HEIGHT = 480, 360
 WINDOW = 7
-EPOCHS = {"nuscenes": 1, "lyft": 3, "widedrive3": 3}
+
+
+def camera_size(dataset):
+    return (518, 434) if "1224" in dataset else (518, 294)
+
+
+EPOCHS = {"nuscenes": 1, "lyft1920": 3, "lyft1224": 3, "widedrive3": 3}
 PARTS = {
     "nuscenes": [(WORK / "nuscenes/processed_10Hz_v2", "nuScenes_Train.txt")],
-    "lyft": [
-        (WORK / "lyft/lyft_train1920_3cams", "train1920.txt"),
-        (WORK / "lyft/lyft_train1224_3cams", "train1224.txt"),
-    ],
+    "lyft1920": [(WORK / "lyft/lyft_train1920_3cams", "train1920.txt")],
+    "lyft1224": [(WORK / "lyft/lyft_train1224_3cams", "train1224.txt")],
     "widedrive3": [(WORK / "WideDrive3_processed/WideDriveTrain", "train.txt")],
 }
 
@@ -68,16 +71,18 @@ def read_list(path):
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
 
 
-def load_image(path):
+def load_image(path, size):
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    image = cv2.resize(image, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    image = cv2.resize(image, (480, 360), interpolation=cv2.INTER_AREA)
     array = image.astype(np.float32)
     array = (array / 127.5) - 1.0
     return torch.from_numpy(np.transpose(array, (2, 0, 1)).copy())
 
 
 class Clips(Dataset):
-    def __init__(self, parts):
+    def __init__(self, parts, size):
+        self.size = size
         self.clips = []
         for root, name in parts:
             for scene in read_list(root / name):
@@ -104,8 +109,8 @@ class Clips(Dataset):
     def __getitem__(self, index):
         image_dir, frames = self.clips[index]
         side = 4 if random.randint(0, 1) else 3
-        left = torch.stack([load_image(image_dir / f"{frame:03d}_5.jpg") for frame in frames])
-        right = torch.stack([load_image(image_dir / f"{frame:03d}_{side}.jpg") for frame in frames])
+        left = torch.stack([load_image(image_dir / f"{frame:03d}_5.jpg", self.size) for frame in frames])
+        right = torch.stack([load_image(image_dir / f"{frame:03d}_{side}.jpg", self.size) for frame in frames])
         return left, right
 
 
@@ -171,7 +176,7 @@ def main():
     net = smooth.Network().cuda().train()
     net.load_state_dict(state_of(args.weight))
     optimizer = optim.Adam(net.parameters(), lr=1e-5)
-    loader = DataLoader(Clips(PARTS[args.dataset]), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, drop_last=True)
+    loader = DataLoader(Clips(PARTS[args.dataset], camera_size(args.dataset)), batch_size=args.batch_size, shuffle=True, num_workers=args.workers, drop_last=True)
     save_dir = ROOT / "SmoothWarp" / "model_drive" / args.dataset
     save_dir.mkdir(parents=True, exist_ok=True)
     print(f"smooth from {args.weight}; spatial {spatial_path}; temporal {temporal_path}", flush=True)

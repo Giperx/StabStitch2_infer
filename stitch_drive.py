@@ -653,7 +653,7 @@ def main():
             for frame in frames
         ]
         try:
-            size_wh = target_size(paths[0][1], args.max_height)
+            size_wh = (518, 434) if "1224" in args.dataset else (518, 294)
             stitched = stitch_clip(
                 spatial_net, temporal_net, smooth_net, paths, size_wh, args.warp_mode, args.max_canvas
             )

@@ -30,14 +30,17 @@ from network import Network, build_model  # noqa: E402
 _LEGACY = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
 WORK = _LEGACY if _LEGACY.exists() else ROOT.parent / "datasets"
 PRETRAINED = ROOT / "pretrained" / "temporal_warp.pth"
-WIDTH, HEIGHT = 480, 360
-EPOCHS = {"nuscenes": 1, "lyft": 3, "widedrive3": 3}
+
+
+def camera_size(dataset):
+    return (518, 434) if "1224" in dataset else (518, 294)
+
+
+EPOCHS = {"nuscenes": 1, "lyft1920": 3, "lyft1224": 3, "widedrive3": 3}
 PARTS = {
     "nuscenes": [(WORK / "nuscenes/processed_10Hz_v2", "nuScenes_Train.txt")],
-    "lyft": [
-        (WORK / "lyft/lyft_train1920_3cams", "train1920.txt"),
-        (WORK / "lyft/lyft_train1224_3cams", "train1224.txt"),
-    ],
+    "lyft1920": [(WORK / "lyft/lyft_train1920_3cams", "train1920.txt")],
+    "lyft1224": [(WORK / "lyft/lyft_train1224_3cams", "train1224.txt")],
     "widedrive3": [(WORK / "WideDrive3_processed/WideDriveTrain", "train.txt")],
 }
 
@@ -47,7 +50,8 @@ def read_list(path):
 
 
 class ConsecutiveFrames(Dataset):
-    def __init__(self, parts):
+    def __init__(self, parts, size):
+        self.size = size
         self.pairs = []
         for root, name in parts:
             for scene in read_list(root / name):
@@ -74,12 +78,13 @@ class ConsecutiveFrames(Dataset):
         first, second = self.pairs[index]
         if random.randint(0, 1):
             first, second = second, first
-        return load(first), load(second)
+        return load(first, self.size), load(second, self.size)
 
 
-def load(path):
+def load(path, size):
     image = cv2.imread(path, cv2.IMREAD_COLOR)
-    image = cv2.resize(image, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    image = cv2.resize(image, (480, 360), interpolation=cv2.INTER_AREA)
     array = image.astype(np.float32)
     array = (array / 127.5) - 1.0
     return torch.from_numpy(np.transpose(array, (2, 0, 1)).copy())
@@ -97,7 +102,7 @@ def main():
     args = parser.parse_args()
     epochs = args.epochs or EPOCHS[args.dataset]
     loader = DataLoader(
-        ConsecutiveFrames(PARTS[args.dataset]),
+        ConsecutiveFrames(PARTS[args.dataset], camera_size(args.dataset)),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.workers,
