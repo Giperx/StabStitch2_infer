@@ -75,6 +75,7 @@ DATASETS = {
     "widedrive3": {
         "gt": "WideDrive_processed/sparseWideFOVImages3_1554x294",
         "cam": 2,  # camera 2 is only the GT filename; stitching still uses 5/4/3
+        "direct": True,
     },
 }
 
@@ -101,12 +102,25 @@ def resolve_data(relative, data_root=None):
 # ---------------------------------------------------------------------------
 # Core metric math
 # ---------------------------------------------------------------------------
-def frame_hm(render, gt, mask):
-    """Histogram-matched scores for one image on the sparse GT mask."""
+def frame_hm(render, gt, mask, match=True):
+    """Histogram-matched scores, or direct scores when match is false."""
     if mask.sum() == 0:
         return None
     pred = render[mask]
     target = gt[mask]
+    if not match:
+        matched = pred
+        diff = matched - target
+        mae = float(np.mean(np.abs(diff)))
+        mse = float(np.mean(diff ** 2))
+        c1 = 0.01 ** 2
+        ssim = float(np.mean((2 * matched * target + c1) / (matched ** 2 + target ** 2 + c1)))
+        return {
+            "hm_mae": mae,
+            "hm_rmse": float(np.sqrt(mse)),
+            "hm_psnr": float(10.0 * np.log10(1.0 / mse)) if mse > 0 else float("inf"),
+            "hm_ssim": ssim,
+        }
     if _HAS_CHANNEL_AXIS:
         matched = match_histograms(pred[np.newaxis, ...], target[np.newaxis, ...], channel_axis=-1)[0]
     else:
@@ -252,7 +266,10 @@ def score_spec(spec, pred_root, gt_root, lpips_fn=None, device=None):
             gt = np.array(Image.open(gt_path).convert("RGB")).astype(np.float64) / 255.0
             mask = np.array(Image.open(mask_path).convert("L")) > 127
             gt, mask = match_gt(render, gt, mask)
-            row = frame_hm(render, gt, mask)
+            direct = spec.get("direct")
+            if direct:
+                mask = np.ones(render.shape[:2], dtype=bool)
+            row = frame_hm(render, gt, mask, match=not direct)
             if row is None:
                 skipped += 1
                 continue
@@ -262,7 +279,7 @@ def score_spec(spec, pred_root, gt_root, lpips_fn=None, device=None):
             scene_full.append(row)
             slices = region_slices(render.shape[1])
             for region, (x0, x1) in slices.items():
-                region_row = frame_hm(render[:, x0:x1], gt[:, x0:x1], mask[:, x0:x1])
+                region_row = frame_hm(render[:, x0:x1], gt[:, x0:x1], mask[:, x0:x1], match=not spec.get("direct"))
                 if region_row is not None:
                     region_row["frame"] = frame
                     scene_regions[region].append(region_row)

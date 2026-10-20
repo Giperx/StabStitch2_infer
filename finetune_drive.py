@@ -41,7 +41,8 @@ sys.path.insert(0, str(ROOT / "SpatialWarp" / "Codes"))
 from loss import cal_lp_loss, cal_perception_loss, inter_grid_loss, intra_grid_loss  # noqa: E402
 from network import Network, build_model  # noqa: E402
 
-WORK = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
+_LEGACY = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
+WORK = _LEGACY if _LEGACY.exists() else ROOT.parent / "datasets"
 PRETRAINED = ROOT / "pretrained" / "spatial_warp.pth"
 WIDTH = 480
 HEIGHT = 360
