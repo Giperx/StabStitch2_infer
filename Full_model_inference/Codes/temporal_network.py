@@ -11,7 +11,10 @@ import torchvision.models as models
 import torchvision.transforms as T
 import random
 from torch import nn, einsum
-from einops import rearrange
+try:
+    from einops import rearrange  # noqa: F401
+except ImportError:  # unused at inference; some reused stitching envs do not ship einops
+    rearrange = None
 
 import grid_res
 grid_h = grid_res.GRID_H
