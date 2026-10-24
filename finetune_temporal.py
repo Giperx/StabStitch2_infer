@@ -36,13 +36,46 @@ def camera_size(dataset):
     return (518, 434) if "1224" in dataset else (518, 294)
 
 
-EPOCHS = {"nuscenes": 1, "lyft1920": 3, "lyft1224": 3, "widedrive3": 3}
+EPOCHS = {"nuscenes": 1, "lyft": 3, "lyft1920": 3, "lyft1224": 3, "widedrive3": 3}
 PARTS = {
     "nuscenes": [(WORK / "nuscenes/processed_10Hz_v2", "nuScenes_Train.txt")],
     "lyft1920": [(WORK / "lyft/lyft_train1920_3cams", "train1920.txt")],
     "lyft1224": [(WORK / "lyft/lyft_train1224_3cams", "train1224.txt")],
+    "lyft": [
+        (WORK / "lyft/lyft_train1920_3cams", "train1920.txt"),
+        (WORK / "lyft/lyft_train1224_3cams", "train1224.txt"),
+    ],
     "widedrive3": [(WORK / "WideDrive3_processed/WideDriveTrain", "train.txt")],
 }
+
+
+def stable_step(optimizer, parameters, max_growth=3.0):
+    params = [p for p in parameters if p.requires_grad]
+    for p in params:
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            optimizer.zero_grad(set_to_none=True)
+            return "nonfinite grad"
+    with torch.no_grad():
+        before = torch.zeros((), device=params[0].device)
+        saved = [p.detach().clone() for p in params]
+        for p in params:
+            before = before + p.detach().float().pow(2).sum()
+        before = torch.sqrt(before)
+    optimizer.step()
+    with torch.no_grad():
+        bad = any(not torch.isfinite(p).all() for p in params)
+        after = torch.zeros((), device=params[0].device)
+        if not bad:
+            for p in params:
+                after = after + p.detach().float().pow(2).sum()
+            after = torch.sqrt(after)
+            bad = float(before) > 0 and float(after) > max_growth * float(before)
+        if bad:
+            for p, old in zip(params, saved):
+                p.copy_(old)
+            optimizer.zero_grad(set_to_none=True)
+            return "weight x{:.1f}".format(float(after) / max(float(before), 1e-12))
+    return ""
 
 
 def read_list(path):
@@ -63,10 +96,11 @@ class ConsecutiveFrames(Dataset):
                     frame, cam = path.stem.rsplit("_", 1)
                     if cam in {"3", "4", "5"}:
                         frames.setdefault(cam, {})[int(frame)] = path
+                size = camera_size(str(root))
                 for cam, items in frames.items():
                     ordered = sorted(items)
                     for left, right in zip(ordered, ordered[1:]):
-                        self.pairs.append((str(items[left]), str(items[right])))
+                        self.pairs.append((str(items[left]), str(items[right]), size))
         if not self.pairs:
             raise SystemExit("no consecutive frames")
         print(f"temporal pairs {len(self.pairs)}", flush=True)
@@ -75,10 +109,10 @@ class ConsecutiveFrames(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, index):
-        first, second = self.pairs[index]
+        first, second, size = self.pairs[index]
         if random.randint(0, 1):
             first, second = second, first
-        return load(first, self.size), load(second, self.size)
+        return load(first, size), load(second, size)
 
 
 def load(path, size):
@@ -127,9 +161,16 @@ def main():
             overlap = cal_lp_loss(left, out["output_mesh"])
             regular = 5 * inter_grid_loss(out["mesh"]) + 5 * intra_grid_loss(out["mesh"])
             loss = overlap + regular
+            if not torch.isfinite(loss):
+                print(f"skip temporal step {index + 1}: nonfinite loss", flush=True)
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 3)
-            optimizer.step()
+            reason = stable_step(optimizer, net.parameters())
+            if reason:
+                print(f"skip temporal step {index + 1}: {reason}", flush=True)
+                continue
             steps += 1
             if index % 20 == 0:
                 print(

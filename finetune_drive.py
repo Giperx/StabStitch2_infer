@@ -44,6 +44,37 @@ from network import Network, build_model  # noqa: E402
 _LEGACY = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
 WORK = _LEGACY if _LEGACY.exists() else ROOT.parent / "datasets"
 PRETRAINED = ROOT / "pretrained" / "spatial_warp.pth"
+
+
+def stable_step(optimizer, parameters, max_growth=3.0):
+    params = [p for p in parameters if p.requires_grad]
+    for p in params:
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            optimizer.zero_grad(set_to_none=True)
+            return "nonfinite grad"
+    with torch.no_grad():
+        before = torch.zeros((), device=params[0].device)
+        saved = [p.detach().clone() for p in params]
+        for p in params:
+            before = before + p.detach().float().pow(2).sum()
+        before = torch.sqrt(before)
+    optimizer.step()
+    with torch.no_grad():
+        bad = any(not torch.isfinite(p).all() for p in params)
+        after = torch.zeros((), device=params[0].device)
+        if not bad:
+            for p in params:
+                after = after + p.detach().float().pow(2).sum()
+            after = torch.sqrt(after)
+            bad = float(before) > 0 and float(after) > max_growth * float(before)
+        if bad:
+            for p, old in zip(params, saved):
+                p.copy_(old)
+            optimizer.zero_grad(set_to_none=True)
+            return "weight x{:.1f}".format(float(after) / max(float(before), 1e-12))
+    return ""
+
+
 def camera_size(dataset):
     return (518, 434) if "1224" in dataset else (518, 294)
 
@@ -69,6 +100,14 @@ DATASETS = {
         "epochs": 3,
         "lr": 1e-5,
         "parts": [{"root": WORK / "lyft/lyft_train1224_3cams", "list": "train1224.txt"}],
+    },
+    "lyft": {
+        "epochs": 3,
+        "lr": 1e-5,
+        "parts": [
+            {"root": WORK / "lyft/lyft_train1920_3cams", "list": "train1920.txt"},
+            {"root": WORK / "lyft/lyft_train1224_3cams", "list": "train1224.txt"},
+        ],
     },
     "widedrive3": {
         "epochs": 3,
@@ -109,12 +148,13 @@ class PairDataset(Dataset):
                 for name in os.listdir(image_dir):
                     if name.endswith(f"_{MID}.jpg"):
                         frames.append(name[: -len(f"_{MID}.jpg")])
+                size = (518, 434) if "1224" in str(root) else (518, 294)
                 for frame in frames:
                     mid = image_dir / f"{frame}_{MID}.jpg"
                     for side in SIDES:
                         other = image_dir / f"{frame}_{side}.jpg"
                         if mid.is_file() and other.is_file():
-                            self.pairs.append((str(mid), str(other)))
+                            self.pairs.append((str(mid), str(other), size))
         if not self.pairs:
             raise SystemExit("no cam5/cam4 or cam5/cam3 training pairs")
         print(f"pairs {len(self.pairs)}", flush=True)
@@ -123,10 +163,10 @@ class PairDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, index):
-        first, second = self.pairs[index]
+        first, second, size = self.pairs[index]
         if random.randint(0, 1) == 1:
             first, second = second, first
-        return load_tensor(first, self.size), load_tensor(second, self.size)
+        return load_tensor(first, size), load_tensor(second, size)
 
 
 def load_tensor(path, size):
@@ -199,9 +239,16 @@ def train(args):
             nonoverlap = 5 * inter_grid_loss(out["mesh_ref"]) + 5 * intra_grid_loss(out["mesh_ref"])
             nonoverlap = nonoverlap + 5 * inter_grid_loss(out["mesh_tgt"]) + 5 * intra_grid_loss(out["mesh_tgt"])
             loss = overlap + nonoverlap
+            if not torch.isfinite(loss):
+                print(f"skip spatial step {index + 1}: nonfinite loss", flush=True)
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=3, norm_type=2)
-            optimizer.step()
+            reason = stable_step(optimizer, net.parameters())
+            if reason:
+                print(f"skip spatial step {index + 1}: {reason}", flush=True)
+                continue
             loss_sum += float(loss.item())
             overlap_sum += float(overlap.item())
             nonoverlap_sum += float(nonoverlap.item())
@@ -216,7 +263,12 @@ def train(args):
                     flush=True,
                 )
             if args.max_steps and steps >= args.max_steps:
-                print(f"stopped after {steps} steps", flush=True)
+                path = save_dir / "spatial_warp.pth"
+                torch.save(
+                    {"model": net.state_dict(), "epoch": epoch + 1, "steps": steps, "dataset": args.dataset},
+                    path,
+                )
+                print(f"stopped after {steps} steps, saved {path}", flush=True)
                 return
         scheduler.step()
         path = save_dir / f"epoch_{epoch + 1}.pth"

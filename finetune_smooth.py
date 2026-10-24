@@ -24,6 +24,35 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
+
+def stable_step(optimizer, parameters, max_growth=3.0):
+    params = [p for p in parameters if p.requires_grad]
+    for p in params:
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            optimizer.zero_grad(set_to_none=True)
+            return "nonfinite grad"
+    with torch.no_grad():
+        before = torch.zeros((), device=params[0].device)
+        saved = [p.detach().clone() for p in params]
+        for p in params:
+            before = before + p.detach().float().pow(2).sum()
+        before = torch.sqrt(before)
+    optimizer.step()
+    with torch.no_grad():
+        bad = any(not torch.isfinite(p).all() for p in params)
+        after = torch.zeros((), device=params[0].device)
+        if not bad:
+            for p in params:
+                after = after + p.detach().float().pow(2).sum()
+            after = torch.sqrt(after)
+            bad = float(before) > 0 and float(after) > max_growth * float(before)
+        if bad:
+            for p, old in zip(params, saved):
+                p.copy_(old)
+            optimizer.zero_grad(set_to_none=True)
+            return "weight x{:.1f}".format(float(after) / max(float(before), 1e-12))
+    return ""
+
 ROOT = Path(__file__).resolve().parent
 _LEGACY = Path("/home/test/LIVA/XZP/FeedForward/work2/0923_synGithub/datasets")
 WORK = _LEGACY if _LEGACY.exists() else ROOT.parent / "datasets"
@@ -34,11 +63,15 @@ def camera_size(dataset):
     return (518, 434) if "1224" in dataset else (518, 294)
 
 
-EPOCHS = {"nuscenes": 1, "lyft1920": 3, "lyft1224": 3, "widedrive3": 3}
+EPOCHS = {"nuscenes": 1, "lyft": 3, "lyft1920": 3, "lyft1224": 3, "widedrive3": 3}
 PARTS = {
     "nuscenes": [(WORK / "nuscenes/processed_10Hz_v2", "nuScenes_Train.txt")],
     "lyft1920": [(WORK / "lyft/lyft_train1920_3cams", "train1920.txt")],
     "lyft1224": [(WORK / "lyft/lyft_train1224_3cams", "train1224.txt")],
+    "lyft": [
+        (WORK / "lyft/lyft_train1920_3cams", "train1920.txt"),
+        (WORK / "lyft/lyft_train1224_3cams", "train1224.txt"),
+    ],
     "widedrive3": [(WORK / "WideDrive3_processed/WideDriveTrain", "train.txt")],
 }
 
@@ -95,10 +128,11 @@ class Clips(Dataset):
                     if cam in {"3", "4", "5"}:
                         frames.setdefault(int(frame), set()).add(cam)
                 ordered = sorted(frame for frame, cams in frames.items() if {"3", "4", "5"} <= cams)
+                size = camera_size(str(root))
                 for start in range(0, len(ordered) - WINDOW + 1):
                     chunk = ordered[start:start + WINDOW]
                     if chunk[-1] - chunk[0] == WINDOW - 1:
-                        self.clips.append((image_dir, chunk))
+                        self.clips.append((image_dir, chunk, size))
         if not self.clips:
             raise SystemExit("no 7-frame clips")
         print(f"smooth clips {len(self.clips)}", flush=True)
@@ -107,7 +141,8 @@ class Clips(Dataset):
         return len(self.clips)
 
     def __getitem__(self, index):
-        image_dir, frames = self.clips[index]
+        image_dir, frames, size = self.clips[index]
+        self.size = size
         side = 4 if random.randint(0, 1) else 3
         left = torch.stack([load_image(image_dir / f"{frame:03d}_5.jpg", self.size) for frame in frames])
         right = torch.stack([load_image(image_dir / f"{frame:03d}_{side}.jpg", self.size) for frame in frames])
@@ -201,9 +236,16 @@ def main():
                 )
                 losses.append(window_loss(loss_fn, out))
             loss = torch.stack(losses).mean()
+            if not torch.isfinite(loss):
+                print(f"skip smooth step {index + 1}: nonfinite loss", flush=True)
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 3)
-            optimizer.step()
+            reason = stable_step(optimizer, net.parameters())
+            if reason:
+                print(f"skip smooth step {index + 1}: {reason}", flush=True)
+                continue
             steps += 1
             print(f"smooth epoch {epoch + 1}/{epochs} step {index + 1} loss {float(loss):.4f}", flush=True)
             if args.max_steps and steps >= args.max_steps:

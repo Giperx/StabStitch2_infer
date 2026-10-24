@@ -36,15 +36,12 @@ def main():
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=0)
     args = parser.parse_args()
-    names = ("lyft1920", "lyft1224") if args.dataset == "lyft" else (args.dataset,)
-    for name in names:
-        args.dataset = name
-        if args.stage in ("both", "spatial"):
-            run("finetune_drive.py", args, ["--batch-size", str(args.batch_size)])
-        if args.stage in ("both", "temporal"):
-            run("finetune_temporal.py", args, ["--batch-size", str(args.batch_size)])
-        if args.stage in ("both", "smooth"):
-            run("finetune_smooth.py", args, ["--batch-size", str(args.smooth_batch)])
+    if args.stage in ("both", "spatial"):
+        run("finetune_drive.py", args, ["--batch-size", str(args.batch_size)])
+    if args.stage in ("both", "temporal"):
+        run("finetune_temporal.py", args, ["--batch-size", str(args.batch_size)])
+    if args.stage in ("both", "smooth"):
+        run("finetune_smooth.py", args, ["--batch-size", str(args.smooth_batch)])
 
 
 if __name__ == "__main__":
