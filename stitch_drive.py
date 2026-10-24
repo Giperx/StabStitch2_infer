@@ -25,6 +25,8 @@ Examples:
 """
 import argparse
 import os
+import re
+import subprocess
 import sys
 
 # CUDA_VISIBLE_DEVICES is read at torch import.
@@ -523,6 +525,55 @@ def stitch_clip(spatial_net, temporal_net, smooth_net, frame_paths, size_wh, war
     return frames
 
 
+def is_oom(exc):
+    return "out of memory" in str(exc).lower()
+
+
+def other_process_holds_gpu(exc=None, minimum_mib=1024):
+    me = os.getpid()
+    if exc is not None:
+        for pid, amount, unit in re.findall(r"Process (\d+) has ([0-9.]+) ([MG]iB)", str(exc)):
+            if int(pid) == me:
+                continue
+            mib = float(amount) * (1024 if unit.startswith("G") else 1)
+            if mib >= minimum_mib:
+                return True
+    gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
+    try:
+        text = subprocess.check_output(
+            ["nvidia-smi", f"--id={gpu}", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in text.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            pid, used = int(parts[0]), float(parts[1])
+        except ValueError:
+            continue
+        if pid != me and used >= minimum_mib:
+            return True
+    return False
+
+
+def oom_kind(exc):
+    if not is_oom(exc):
+        return None
+    return "contention" if other_process_holds_gpu(exc) else "method"
+
+
+def camera_on_white(image):
+    height, width = image.shape[:2]
+    canvas = np.full((height, width * 3, 3), 255, np.uint8)
+    canvas[:, width:width * 2] = image
+    valid = np.zeros((height, width * 3), dtype=bool)
+    valid[:, width:width * 2] = True
+    return canvas, valid, valid.copy()
+
+
 def crop_cam5_triple(image, cam5):
     """Camera 5 in the center, with one camera-5 width on each side.
 
@@ -658,9 +709,20 @@ def main():
                 spatial_net, temporal_net, smooth_net, paths, size_wh, args.warp_mode, args.max_canvas
             )
         except (RuntimeError, OSError, ValueError) as exc:
-            failed += len(pending)
-            print(f"  skip {scene.name}: {exc}", flush=True)
             torch.cuda.empty_cache()
+            if oom_kind(exc) == "contention":
+                print(f"  {scene.name}: another process holds the GPU, keeping camera 5 on white", flush=True)
+                for frame in pending:
+                    camera = load_bgr(image_dir / f"{frame}_{CAM_MID}.jpg", size_wh)
+                    image, valid, cam5 = camera_on_white(camera)
+                    save_metric(image, valid, cam5, gt_w, gt_h, preview_dir, metric_dir, frame)
+                    saved += 1
+                continue
+            failed += len(pending)
+            if oom_kind(exc) == "method":
+                print(f"  fail {scene.name}: method exceeds GPU memory, nothing saved", flush=True)
+            else:
+                print(f"  skip {scene.name}: {exc}", flush=True)
             continue
         # One canvas covers the whole clip, so a partial rerun rewrites every saved frame.
         for frame, (image, valid, cam5) in zip(frames, stitched):
