@@ -235,6 +235,20 @@ def default_report_path(output_root, dataset, method):
     return Path(output_root) / "metric_eval" / dataset / f"{method}_hm.txt"
 
 
+def blank_side(render, fraction=0.90, level=0.98):
+    image = render.astype(np.float64)
+    if image.max(initial=0) > 1.5:
+        image = image / 255.0
+    white = image.min(axis=-1) >= level
+    third = white.shape[1] // 3
+    if third < 1:
+        return True
+    for start in (0, white.shape[1] - third):
+        if float(white[:, start:start + third].mean()) >= fraction:
+            return True
+    return False
+
+
 def score_spec(spec, pred_root, gt_root, lpips_fn=None, device=None):
     """Score every ``{scene}/{frame}.png`` under ``pred_root`` for one dataset.
 
@@ -250,6 +264,7 @@ def score_spec(spec, pred_root, gt_root, lpips_fn=None, device=None):
     region_rows = {name: [] for name in REGION_ORDER}
     per_scene = []
     skipped = 0
+    blank = 0
     for scene in scenes:
         pred_dir = pred_root / scene
         gt_dir = Path(gt_root) / scene
@@ -263,6 +278,10 @@ def score_spec(spec, pred_root, gt_root, lpips_fn=None, device=None):
                 skipped += 1
                 continue
             render = np.array(Image.open(pred_dir / name).convert("RGB")).astype(np.float64) / 255.0
+            if blank_side(render):
+                blank += 1
+                print(f"  reject {scene} {frame}: blank side", flush=True)
+                continue
             gt = np.array(Image.open(gt_path).convert("RGB")).astype(np.float64) / 255.0
             mask = np.array(Image.open(mask_path).convert("L")) > 127
             gt, mask = match_gt(render, gt, mask)
@@ -294,6 +313,12 @@ def score_spec(spec, pred_root, gt_root, lpips_fn=None, device=None):
                 (scene, scene_stats, {name: mean_rows(rows) for name, rows in scene_regions.items()})
             )
             print(f"  {scene}: {len(scene_full)} frames", flush=True)
+    judged = len(full_rows) + blank
+    print(
+        f"Success: {len(full_rows)}/{judged} ({(len(full_rows) / judged if judged else 0):.1%}); "
+        f"blank-side rejected: {blank}",
+        flush=True,
+    )
     return full_rows, region_rows, per_scene, skipped
 
 
